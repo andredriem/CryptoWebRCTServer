@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebRTC DataChannel Chat</title>
+  <style>
+    #chat { width: 100%; height: 200px; }
+    #message { width: 80%; }
+  </style>
+</head>
+<body>
+  <h3>Room “abc” Chat</h3>
+  <textarea id="chat" readonly></textarea><br>
+  <input id="message" type="text" placeholder="Type…" />
+  <button id="send">Send</button>
+  <button id="start">Start Connection</button>
+
+<script>
+  // 1) connect to Go signaling server
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "join", room: "abc" }));
+    console.log("Joined room “abc”");
+  };
+
+  // 2) set up RTCPeerConnection with NO STUN/TURN
+  const pc = new RTCPeerConnection({ iceServers: [] });
+
+  // relay ICE candidates via signaling
+  pc.onicecandidate = e => {
+    if (!e.candidate) return;
+    ws.send(JSON.stringify({ type: "ice", candidate: e.candidate }));
+  };
+
+  // when a remote data channel arrives
+  pc.ondatachannel = e => {
+    setupChannel(e.channel);
+  };
+
+  // when signaling server sends us something
+  ws.onmessage = async evt => {
+    const msg = JSON.parse(evt.data);
+    switch (msg.type) {
+      case "offer":
+        await pc.setRemoteDescription(msg);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify(pc.localDescription));
+        break;
+
+      case "answer":
+        await pc.setRemoteDescription(msg);
+        break;
+
+      case "ice":
+        try {
+          await pc.addIceCandidate(msg.candidate);
+        } catch (e) {
+          console.error("ICE error:", e);
+        }
+        break;
+    }
+  };
+
+  // 3) create our data channel & send an offer
+  document.getElementById("start").onclick = async () => {
+    const dc = pc.createDataChannel("chat");
+    setupChannel(dc);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify(pc.localDescription));
+  };
+
+  // 4) helper to wire data‐channel → chat UI
+  function setupChannel(channel) {
+    channel.onopen = () => console.log("DataChannel open");
+    channel.onmessage = e => {
+      chat.value += "Peer: " + e.data + "\n";
+    };
+    send.onclick = () => {
+      const text = message.value;
+      channel.send(text);
+      chat.value += "You: " + text + "\n";
+      message.value = "";
+    };
+  }
+
+  // DOM shortcuts
+  const chat    = document.getElementById("chat");
+  const message = document.getElementById("message");
+  const send    = document.getElementById("send");
+</script>
+</body>
+</html>

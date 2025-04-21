@@ -5,7 +5,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -15,6 +17,16 @@ type registerRequest struct {
     TempEphemeralUserId      string   `json:"tempEphemeralUserId"`
     HourId                   int64    `json:"hourId"`
 }
+
+// --- new WebRTC signaling state:
+var (
+    rooms   = make(map[string]map[*websocket.Conn]bool)
+    roomsMu sync.Mutex
+
+    upgrader = websocket.Upgrader{
+        CheckOrigin: func(r *http.Request) bool { return true },
+    }
+)
 
 func main() {
     // if we're on a nuke server, start the half‑past‑hour ticker
@@ -56,6 +68,12 @@ func main() {
         w.WriteHeader(http.StatusAccepted)
     })
 
+    // WebRTC signaling endpoint
+    http.HandleFunc("/ws", wsHandler)
+
+    // serve your static files (index.html + client JS) unmodified
+    http.Handle("/", http.FileServer(http.Dir("./static")))
+
     log.Println("listening on :8080")
     log.Fatal(http.ListenAndServe(":8080", nil))
 }
@@ -64,4 +82,64 @@ func main() {
 func nukeRoutine(cache *RedisClientConnectionCache) {
     log.Println("🚀 running nuke routine at", time.Now().Format(time.RFC3339))
 	NukeRedis(GetCurrentHour(), cache)
+}
+
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+    conn, err := upgrader.Upgrade(w, r, nil)
+    if err != nil {
+        log.Println("ws upgrade:", err)
+        return
+    }
+    defer conn.Close()
+
+    var roomName string
+
+    for {
+        mt, msg, err := conn.ReadMessage()
+        if err != nil {
+            // cleanup
+            roomsMu.Lock()
+            if roomName != "" {
+                delete(rooms[roomName], conn)
+                if len(rooms[roomName]) == 0 {
+                    delete(rooms, roomName)
+                }
+            }
+            roomsMu.Unlock()
+            return
+        }
+
+        // dispatch join vs relay
+        var m map[string]interface{}
+        if err := json.Unmarshal(msg, &m); err != nil {
+            log.Println("ws json:", err)
+            continue
+        }
+
+        if m["type"] == "join" {
+            if rn, ok := m["room"].(string); ok {
+                roomName = rn
+                roomsMu.Lock()
+                if rooms[rn] == nil {
+                    rooms[rn] = make(map[*websocket.Conn]bool)
+                }
+                rooms[rn][conn] = true
+                roomsMu.Unlock()
+            }
+            continue
+        }
+
+        // broadcast to peers
+        roomsMu.Lock()
+        peers := rooms[roomName]
+        roomsMu.Unlock()
+        for peer := range peers {
+            if peer == conn {
+                continue
+            }
+            if err := peer.WriteMessage(mt, msg); err != nil {
+                log.Println("ws write:", err)
+            }
+        }
+    }
 }
