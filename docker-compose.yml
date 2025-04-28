@@ -1,0 +1,12 @@
+services:
+  domain_name_hash_server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_CLIENT_1=redis://redis:6379/1
+      - REDIS_CLIENT_2=redis://redis:6379/2
+  redis:
+    image: redis:latest

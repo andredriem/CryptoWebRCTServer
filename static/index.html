@@ -2,94 +2,156 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>WebRTC DataChannel Chat</title>
+  <title>P2P Chat via Ephemeral IDs</title>
   <style>
-    #chat { width: 100%; height: 200px; }
+    body { font-family: sans-serif; padding: 1em; }
+    pre { background: #f4f4f4; padding: 0.5em; overflow-x: auto; }
+    #chat    { width: 100%; height: 200px; margin-top: 1em; }
     #message { width: 80%; }
+    input, button { margin: 0.2em 0; }
   </style>
 </head>
 <body>
-  <h3>Room “abc” Chat</h3>
-  <textarea id="chat" readonly></textarea><br>
-  <input id="message" type="text" placeholder="Type…" />
+  <h2>Your IDs (fresh on each load)</h2>
+  <p><strong>Private ID (room):</strong></p>
+  <pre id="privateDisplay"></pre>
+  <p><strong>Your Ephemeral ID:</strong></p>
+  <pre id="ephDisplay"></pre>
+
+  <h2>Connect to a Friend</h2>
+  <input id="friendEph" placeholder="Paste friend’s 64-hex EphID…" size="70"/>
+  <button id="setFriend">Use This EphID</button>
+  <p>Current friend’s EphID: <code id="friendDisplay">— none —</code></p>
+
+  <h2>Chat</h2>
+  <textarea id="chat" readonly></textarea><br/>
+  <input id="message" placeholder="Type your message…" />
   <button id="send">Send</button>
   <button id="start">Start Connection</button>
 
 <script>
-  // 1) connect to Go signaling server
-  const ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type: "join", room: "abc" }));
-    console.log("Joined room “abc”");
+  // Helper to generate 256-bit hex strings
+  function make256Hex() {
+    const arr = new Uint8Array(32);
+    crypto.getRandomValues(arr);
+    return Array.from(arr)
+      .map(b => b.toString(16).padStart(2,'0'))
+      .join('');
+  }
+
+  // 1) fresh privateId + eph each load
+  const privateId = make256Hex();
+  const eph       = make256Hex();
+  document.getElementById('privateDisplay').textContent = privateId;
+  document.getElementById('ephDisplay').textContent     = eph;
+
+  // 2) register your eph with the Go server
+  const hourId = Math.floor(Date.now() / (1000*60*60));
+  fetch('/register', {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify({
+      ephemeralContactKeysList: [ eph ],
+      tempEphemeralUserId:     privateId,
+      hourId
+    })
+  })
+  .then(r => {
+    if (!r.ok) throw new Error('register failed: ' + r.status);
+    console.log('Registered eph → privateId');
+  })
+  .catch(console.error);
+
+  // 3) friend’s eph input
+  let friendEph = '';
+  document.getElementById('setFriend').onclick = () => {
+    const v = document.getElementById('friendEph').value.trim();
+    if (!/^[0-9a-f]{64}$/.test(v)) {
+      return alert('EphID must be exactly 64 lowercase hex chars');
+    }
+    friendEph = v;
+    document.getElementById('friendDisplay').textContent = v;
   };
 
-  // 2) set up RTCPeerConnection with NO STUN/TURN
-  const pc = new RTCPeerConnection({ iceServers: [] });
+  // 4) WebSocket & RTCPeerConnection
+  let ws, pc;
 
-  // relay ICE candidates via signaling
-  pc.onicecandidate = e => {
-    if (!e.candidate) return;
-    ws.send(JSON.stringify({ type: "ice", candidate: e.candidate }));
-  };
+  function initWS() {
+    ws = new WebSocket(`ws://${location.host}/ws?room=${privateId}`);
+    ws.onmessage = onSignal;
+    ws.onerror   = e => console.error('WS error', e);
+  }
 
-  // when a remote data channel arrives
-  pc.ondatachannel = e => {
-    setupChannel(e.channel);
-  };
+  function sendSignal(msg) {
+    if (!friendEph) {
+      return alert('Set a friend’s EphID first');
+    }
+    if (ws.readyState !== WebSocket.OPEN) {
+      console.warn('WebSocket not open yet, dropping:', msg);
+      return;
+    }
+    ws.send(JSON.stringify({ ...msg, ephemeralId: friendEph }));
+  }
 
-  // when signaling server sends us something
-  ws.onmessage = async evt => {
+  async function onSignal(evt) {
     const msg = JSON.parse(evt.data);
     switch (msg.type) {
-      case "offer":
-        await pc.setRemoteDescription(msg);
+      case 'offer':
+        await pc.setRemoteDescription({ type: msg.type, sdp: msg.sdp });
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify(pc.localDescription));
+        sendSignal({ type: answer.type, sdp: answer.sdp });
         break;
 
-      case "answer":
-        await pc.setRemoteDescription(msg);
+      case 'answer':
+        await pc.setRemoteDescription({ type: msg.type, sdp: msg.sdp });
         break;
 
-      case "ice":
+      case 'ice':
         try {
           await pc.addIceCandidate(msg.candidate);
         } catch (e) {
-          console.error("ICE error:", e);
+          console.error('ICE error', e);
         }
         break;
     }
-  };
-
-  // 3) create our data channel & send an offer
-  document.getElementById("start").onclick = async () => {
-    const dc = pc.createDataChannel("chat");
-    setupChannel(dc);
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    ws.send(JSON.stringify(pc.localDescription));
-  };
-
-  // 4) helper to wire data‐channel → chat UI
-  function setupChannel(channel) {
-    channel.onopen = () => console.log("DataChannel open");
-    channel.onmessage = e => {
-      chat.value += "Peer: " + e.data + "\n";
-    };
-    send.onclick = () => {
-      const text = message.value;
-      channel.send(text);
-      chat.value += "You: " + text + "\n";
-      message.value = "";
-    };
   }
 
-  // DOM shortcuts
-  const chat    = document.getElementById("chat");
-  const message = document.getElementById("message");
-  const send    = document.getElementById("send");
+  document.getElementById('start').onclick = () => {
+    initWS();
+
+    ws.onopen = async () => {
+      pc = new RTCPeerConnection({ iceServers: [] });
+
+      pc.onicecandidate = e => {
+        if (e.candidate) {
+          sendSignal({ type: 'ice', candidate: e.candidate });
+        }
+      };
+
+      pc.ondatachannel = e => setupDC(e.channel);
+
+      // caller: create channel + offer
+      const dc = pc.createDataChannel('chat');
+      setupDC(dc);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sendSignal({ type: offer.type, sdp: offer.sdp });
+    };
+  };
+
+  function setupDC(channel) {
+    const chat = document.getElementById('chat');
+    channel.onopen    = () => console.log('DataChannel open');
+    channel.onmessage = e => chat.value += 'Peer: ' + e.data + '\n';
+    document.getElementById('send').onclick = () => {
+      const text = document.getElementById('message').value;
+      channel.send(text);
+      chat.value += 'You:  ' + text + '\n';
+      document.getElementById('message').value = '';
+    };
+  }
 </script>
 </body>
 </html>

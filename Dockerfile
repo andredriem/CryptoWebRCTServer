@@ -1,8 +1,8 @@
-FROM golang:1.21-alpine
+FROM golang:1.24-alpine
 WORKDIR /app
-COPY go.mod ./
+COPY . ./
 RUN go mod download
-COPY main.go ./
+RUN go mod tidy
 RUN go build -o server .
 EXPOSE 8080
 CMD ["./server"]

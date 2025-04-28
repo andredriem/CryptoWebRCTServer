@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -20,18 +19,17 @@ type registerRequest struct {
 
 // --- new WebRTC signaling state:
 var (
-    rooms   = make(map[string]map[*websocket.Conn]bool)
-    roomsMu sync.Mutex
-
     upgrader = websocket.Upgrader{
         CheckOrigin: func(r *http.Request) bool { return true },
     }
 )
 
+// global Redis client cache, accessible to all goroutines
+var redisCleintCache = &RedisClientConnectionCache{}
+
 func main() {
     // if we're on a nuke server, start the half‑past‑hour ticker
 
-	redisCleintCache := &RedisClientConnectionCache{}
 
     if os.Getenv("IS_NUKE_SERVER") == "true" {
         go ScheduleHalfPastHour(nukeRoutine, redisCleintCache)
@@ -92,54 +90,21 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
     }
     defer conn.Close()
 
-    var roomName string
-
-    for {
-        mt, msg, err := conn.ReadMessage()
-        if err != nil {
-            // cleanup
-            roomsMu.Lock()
-            if roomName != "" {
-                delete(rooms[roomName], conn)
-                if len(rooms[roomName]) == 0 {
-                    delete(rooms, roomName)
-                }
-            }
-            roomsMu.Unlock()
-            return
-        }
-
-        // dispatch join vs relay
-        var m map[string]interface{}
-        if err := json.Unmarshal(msg, &m); err != nil {
-            log.Println("ws json:", err)
-            continue
-        }
-
-        if m["type"] == "join" {
-            if rn, ok := m["room"].(string); ok {
-                roomName = rn
-                roomsMu.Lock()
-                if rooms[rn] == nil {
-                    rooms[rn] = make(map[*websocket.Conn]bool)
-                }
-                rooms[rn][conn] = true
-                roomsMu.Unlock()
-            }
-            continue
-        }
-
-        // broadcast to peers
-        roomsMu.Lock()
-        peers := rooms[roomName]
-        roomsMu.Unlock()
-        for peer := range peers {
-            if peer == conn {
-                continue
-            }
-            if err := peer.WriteMessage(mt, msg); err != nil {
-                log.Println("ws write:", err)
-            }
-        }
+    privateRoomName := r.URL.Query().Get("room")
+    // if neither is set close the connection
+    if privateRoomName == ""{
+        log.Println("ws no room name")
+        return
     }
+
+    // Get the current hour
+    currentHour := GetCurrentHour()
+    // Get the Redis client based on the current hour
+    redisClient, err := GetRedisClient(currentHour, redisCleintCache)
+    if err != nil {
+        log.Println("ws get redis client:", err)
+        return
+    }
+
+    HandleRoom(privateRoomName, redisClient, conn)
 }

@@ -7,7 +7,6 @@
 //    2.1 If the hourId is odd it deletes the fist redis client defined in the env REDIS_CLIENT_1
 //    2.2 If the hourId is even it deletes the second redis client defined in the env REDIS_CLIENT_2
 
-
 package main
 
 import (
@@ -20,11 +19,11 @@ import (
 
 // RedisClientConnectionCache stores redis clients and URIs
 type RedisClientConnectionCache struct {
-	RedisClient1     *redis.Client
-	RedisClient1URI  string
-	RedisClient2     *redis.Client
-	RedisClient2URI  string
-	mu               sync.Mutex // To ensure thread-safe initialization
+	RedisClient1    *redis.Client
+	RedisClient1URI string
+	RedisClient2    *redis.Client
+	RedisClient2URI string
+	mu              sync.Mutex // To ensure thread-safe initialization
 }
 
 // GetRedisClient returns a redis client based on the hourId.
@@ -38,18 +37,24 @@ func GetRedisClient(hourId int64, cache *RedisClientConnectionCache) (*redis.Cli
 		// Odd → Client1
 		if cache.RedisClient1 == nil {
 			cache.RedisClient1URI = os.Getenv("REDIS_CLIENT_1")
-			cache.RedisClient1 = redis.NewClient(&redis.Options{
-				Addr: cache.RedisClient1URI,
-			})
+			opts, err := redis.ParseURL(cache.RedisClient1URI)
+			if err != nil {
+				log.Println("Invalid Redis URI for client1:", err)
+				return nil, err
+			}
+			cache.RedisClient1 = redis.NewClient(opts)
 		}
 		return cache.RedisClient1, nil
 	} else {
 		// Even → Client2
 		if cache.RedisClient2 == nil {
 			cache.RedisClient2URI = os.Getenv("REDIS_CLIENT_2")
-			cache.RedisClient2 = redis.NewClient(&redis.Options{
-				Addr: cache.RedisClient2URI,
-			})
+			opts, err := redis.ParseURL(cache.RedisClient2URI)
+			if err != nil {
+				log.Println("Invalid Redis URI for client2:", err)
+				return nil, err
+			}
+			cache.RedisClient2 = redis.NewClient(opts)
 		}
 		return cache.RedisClient2, nil
 	}
